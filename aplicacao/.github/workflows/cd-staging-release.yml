@@ -1,0 +1,35 @@
+name: Release staging - Blue Green
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: '${{ secrets.PROJECT_ID }}'
+  GAR_LOCATION: '${{ secrets.REGION }}'
+  REGION: '${{ secrets.REGION }}'
+  SERVICE: 'crun-bootcamp-sre-staging'
+  AMBIENTE: 'staging'
+
+jobs:
+  deploy:
+    environment: staging
+    # Add 'id-token' with the intended permissions for workload identity federation
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: ❤️Checkout
+        uses: actions/checkout@v2
+
+      - name: 🥑 Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: 💚 Update Traffic Cloud Run - Blue Green
+        run: |
+          gcloud run services update-traffic $SERVICE --region $REGION --to-tags green=100;
+          gcloud run services update-traffic $SERVICE --region $REGION --remove-tags=blue;
+#:END

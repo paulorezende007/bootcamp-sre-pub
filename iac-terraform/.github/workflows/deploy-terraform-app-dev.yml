@@ -1,0 +1,177 @@
+name: Deploy-Terraform-App-DEV
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+# JOB 01 - Gera o artefato (codigo terraform) para ser usado nos JOBS seguintes
+  build:
+    name: Build Artifact
+    runs-on: ubuntu-latest
+
+    env:
+      TF-FOLDER: "app-dev" # Pasta onde está o IaC no Repositorio
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: ❤️ Upload Artifact
+        uses: actions/upload-artifact@v1
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//${{ env.TF-FOLDER }}
+
+
+# JOB 02 - Executa o terraform plan para validar o que será aplicado pelo Terraform
+  terraform-plan:
+    name: Terraform - Plan
+    runs-on: ubuntu-latest
+
+    needs: build
+
+    env:
+      TF-FOLDER: "app-dev" # Pasta onde está o IaC no Repositorio
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}//${{ env.TF-FOLDER }}  
+   
+    steps:
+      - name: ❤️ Checkout
+        uses: actions/checkout@v2
+
+      - name: 🥑 Login no Azure via Service Principal
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+
+      - name: 🔎 Check IP and Set the value
+        run: echo "ip_git=$(curl -sfkLm10 --retry 3 --retry-delay 5 https://api.ipify.org)" >> $GITHUB_ENV
+
+      - name: ⚙️ Add IP Address Storage Account
+        run: az storage account network-rule add --resource-group "resourcegroup" --account-name "storageaccount" --ip-address "${{ env.ip_git }}"
+
+      - name: 😴 Sleep
+        run: sleep 10
+
+      - name: 🌍 Google Auth # via key json
+        id: auth
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: ❤️ Download Codigo Terraform
+        uses: actions/download-artifact@v2
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//${{ env.TF-FOLDER }}
+
+      - name: ⚙️ Install Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_wrapper: false
+
+      - name: 🐋 Terraform Init
+        id: init
+        env:
+            SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+            mkdir -p ~/.ssh
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+            ssh-add - <<< "${{ secrets.SSH_PRIVATE_KEY }}"
+            terraform init
+            
+      - name: 🐰 Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: 🐧 Terraform Plan
+        id: plan
+        run: terraform plan
+        continue-on-error: false
+
+      - name: 🗑️ Remove IP Address Storage Account
+        run: az storage account network-rule remove --resource-group "resourcegroup" --account-name "storageaccount" --ip-address "${{ env.ip_git }}"
+
+# JOB 03 - Executa o terraform apply para aplicar as mudanças de infraestrutura
+# É necessário aprovação
+  terraform-apply:
+    name: Terraform - Apply
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+
+    needs: terraform-plan
+
+    env:
+      TF-FOLDER: "app-dev" # Pasta onde está o IaC no Repositorio
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}    
+   
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}//${{ env.TF-FOLDER }}
+
+    steps:
+      - name: ❤️ Checkout
+        uses: actions/checkout@v2
+
+      - name: 🥑 Login no Azure via Service Principal
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+
+      - name: 🔎 Check IP and Set the value
+        run: echo "ip_git=$(curl -sfkLm10 --retry 3 --retry-delay 5 https://api.ipify.org)" >> $GITHUB_ENV
+
+      - name: ⚙️ Add IP Address Storage Account
+        run: az storage account network-rule add --resource-group "resourcegroup" --account-name "storageaccount" --ip-address "${{ env.ip_git }}"
+
+      - name: 😴 Sleep
+        run: sleep 10
+
+      - name: 🌍 Google Auth # via key json
+        id: auth
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: ❤️ Download Codigo Terraform
+        uses: actions/download-artifact@v2
+        with:
+          name: terraform
+          path: ${{ github.workspace }}//${{ env.TF-FOLDER }}
+
+      - name: ⚙️ Install Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_wrapper: false
+
+      - name: 🐋 Terraform Init
+        id: init
+        env:
+            SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+            mkdir -p ~/.ssh
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+            ssh-add - <<< "${{ secrets.SSH_PRIVATE_KEY }}"
+            terraform init
+            
+      - name: 🐰 Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: 🐧 Terraform Apply
+        run: terraform apply --auto-approve -lock=true
+        
+      - name: 🗑️ Remove IP Address Storage Account
+        run: az storage account network-rule remove --resource-group "resourcegroup" --account-name "storageaccount" --ip-address "${{ env.ip_git }}"
+#:END

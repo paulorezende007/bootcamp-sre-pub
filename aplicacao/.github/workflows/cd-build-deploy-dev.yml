@@ -1,0 +1,91 @@
+name: Build Deploy DEV - Blue Green
+on:
+  workflow_dispatch:
+  push:
+     branches:
+       - dev
+
+env:
+  PROJECT_ID: "${{ secrets.PROJECT_ID }}"
+  GAR_LOCATION: "${{ secrets.REGION }}"
+  REGION: "${{ secrets.REGION }}"
+  SERVICE: "crun-bootcamp-sre-dev"
+  AMBIENTE: "dev"
+  DD_AGENT_MAJOR_VERSION: "7"
+  DD_API_KEY: ${{ secrets.DD_API_KEY }}
+  DD_SITE: "datadoghq.com"
+  DD_SERVICE: "PythonBootCamp-Dev"
+  DD_LOGS_INJECTION: "true"
+
+jobs:
+  deploy:
+    environment: dev
+    # Add 'id-token' with the intended permissions for workload identity federation
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: ❤️Checkout
+        uses: actions/checkout@v2
+
+      - name: 🥑 Google Auth
+        id: auth
+        uses: "google-github-actions/auth@v0"
+        with:
+          credentials_json: "${{ secrets.GCP_CREDENTIALS }}"
+
+      - name: 🐋 Docker Auth
+        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev;
+
+      - name: ⚙️ Build Image
+        run: |
+          docker build \
+          --build-arg DD_HOSTNAME=${{ env.AMBIENTE }} \
+          --build-arg DD_AGENT_MAJOR_VERSION=${{ env.DD_AGENT_MAJOR_VERSION }} \
+          --build-arg DD_API_KEY=${{ env.DD_API_KEY }} \
+          --build-arg DD_SITE=${{ env.DD_SITE }} \
+          --build-arg DD_SERVICE=${{ env.DD_SERVICE }} \
+          --build-arg DD_ENV=${{ env.AMBIENTE }} \
+          --build-arg DD_LOGS_INJECTION=${{ env.DD_LOGS_INJECTION }} \
+          -t "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ secrets.REGISTER }}/app-${{ env.AMBIENTE }}:${{ github.sha }}" ./app/;
+
+      - name: 🪑 Run Local Postgress
+        run: |
+          docker run -id --rm --name 'postgres-db' -p 5432:5432 -e POSTGRES_PASSWORD=abc123 postgres && sleep 5;
+          docker exec -t 'postgres-db' ""psql -U postgres -c 'CREATE TABLE messages (id SERIAL PRIMARY KEY, message varchar(255) NOT NULL)'"";
+
+      - name: ❓ Run Local Image and Test is OK
+        run: |
+          docker run -id --rm --name=run_app -p 80:8000 -e DB_HOST='172.17.0.2' -e DB_NAME='postgres' -e DB_USER='postgres' -e DB_PASSWD=abc123 \
+          "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ secrets.REGISTER }}/app-${{ env.AMBIENTE }}:${{ github.sha }}" && sleep 5;
+          if [ $(docker ps -a | egrep -ci 'run_app') -ne 1 ]; then exit 1; ::exit::failure; fi
+          #docker inspect --format="{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}{{.Name}}" $(docker ps -aq); docker ps -a; netstat -tlnpeu;
+          if [ $(curl -sfkILm10 'http://localhost' | egrep -ci '200 OK') -ne 1 ]; then exit 1; ::exit::failure; fi
+
+      - name: 🚀 Push Image
+        run: docker push "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ secrets.REGISTER }}/app-${{ env.AMBIENTE }}:${{ github.sha }}";
+
+      - name: 💙 Define Tag Blue (revisao atual)
+        run: |
+          gcloud run services update-traffic $SERVICE --region $REGION --clear-tags;
+          gcloud run services update $SERVICE --region $REGION --tag=blue
+
+      - name: 💚 Deploy to Cloud Run - Tag Green (revisao nova)
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v0
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ secrets.REGISTER }}/app-${{ env.AMBIENTE }}:${{ github.sha }}"
+          tag: green
+          no_traffic: true
+
+      - name: 🐸 Update Traffic Cloud Run - Blue/Green
+        run: gcloud run services update-traffic $SERVICE --region $REGION --to-tags green=30,blue=70;
+
+      # If required, use the Cloud Run url output in later steps
+      - name: 🔎 Show Output
+        run: echo ${{ steps.deploy.outputs.url }};
+#:END
